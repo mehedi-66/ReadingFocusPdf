@@ -8,6 +8,6 @@
 4. zoom in and zoom out
 5. Full Screen mode
 6. Most left give page number Enter to that page
-7. `CRP` enter value this save value same pdf one you can see the value
+7. `CRP` give vlaue press enter this way save page number incase same pdf open you can see the value
 
 <img src="demo.png">
