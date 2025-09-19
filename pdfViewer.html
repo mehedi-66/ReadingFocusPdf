@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reading Focus</title>
+  <script src="pdf.min.js"></script>
+  <link href="all.min.css" rel="stylesheet">
+  <link href="style.css" rel="stylesheet">
+</head>
+<body>
+  <div class="container">
+    <div class="header-wrapper">
+      <div class="header">
+        <div class="header-left">
+          <div class="page-info">
+            <input type="number" id="page-input" min="1" value="1" placeholder="Enter page" /> / <span id="total-pages">0</span>
+          </div>
+        </div>
+        <div class="controls">
+          <div class="zoom-controls">
+            <button class="btn btn-icon" onclick="changeScale(0.2)" title="Zoom In"><i class="fas fa-search-plus"></i></button>
+            <button class="btn btn-icon" onclick="changeScale(-0.2)" title="Zoom Out"><i class="fas fa-search-minus"></i></button>
+            <button class="btn btn-icon" onclick="fitToPage()" title="Fit to Page"><i class="fas fa-expand"></i></button>
+            <button class="btn btn-icon" onclick="toggleFullscreen()" title="Toggle Fullscreen" id="fullscreenBtn">
+              <i class="fas fa-expand-arrows-alt"></i>
+            </button>
+          </div>
+          <button id="playPauseBtn" class="btn">
+            <i class="fas fa-play"></i>
+            <span>Play</span>
+          </button>
+          <button id="autoPlayBtn" class="btn btn-icon" title="Toggle Auto-play">
+            <i class="fas fa-magic"></i>
+          </button>
+          <div class="speech-controls">
+            <select id="voiceSelect" class="speech-select" title="Select Voice">
+              <option value="">Default Voice</option>
+            </select>
+            <div class="speed-control">
+              <input type="range" id="speedRange" min="0.5" max="2" step="0.1" value="1" title="Speech Rate">
+              <span id="speedValue">1x</span>
+            </div>
+          </div>
+          <div id="status">Reading...</div>
+        </div>
+      </div>
+    </div>
+    <div id="pdf-container" class="pdf-container"></div>
+  </div>
+
+  <script>
+    // PDF configuration
+    const url = "1. Operating Systems - Three Easy Pieces.pdf";
+    let currentScale = 1.2;
+    let isReading = false;
+    let pdfDoc = null;
+    let currentPageNum = 0;
+    let totalPages = 0;
+    let loadedPages = new Set();
+    let isLoadingPages = false;
+    let defaultScale = 1.2;
+    const PAGES_PER_LOAD = 5;
+
+
+    function getCurrentPdfName() {
+      return url.split('/').pop() || 'Unknown PDF';
+    }
+
+    // Speech-related variables initialization
+    const playPauseBtn = document.getElementById('playPauseBtn');
+    const statusDiv = document.getElementById('status');
+    const autoPlayBtn = document.getElementById('autoPlayBtn');
+    let currentUtterance = null;
+    let lastWordBoundary = 0;
+    let isAutoPlayEnabled = false;
+    let autoPlayTimeout = null;
+    let speechState = {
+      text: '',
+      position: 0,
+      node: null,
+      isPaused: false,
+      selectedVoice: null,
+      rate: 1.0  // Default normal speed
+    };
+
+    // Initialize voice selection
+    async function populateVoiceList() {
+      const voiceSelect = document.getElementById('voiceSelect');
+      
+      // Wait for voices to be loaded
+      if (speechSynthesis.getVoices().length === 0) {
+        return new Promise(resolve => {
+          speechSynthesis.onvoiceschanged = () => {
+            resolve(populateVoiceList());
+          };
+        });
+      }
+      
+      const voices = speechSynthesis.getVoices();
+      console.log('Available voices:', voices); // Debug log
+      
+      // Clear all existing options
+      voiceSelect.innerHTML = '';
+      
+      // Find our specific voices
+      const ukMale = voices.find(voice => voice.name === 'Google UK English Male');
+      const usDavid = voices.find(voice => voice.name === 'Microsoft David - English (United States)');
+      
+      console.log('UK Male voice:', ukMale); // Debug log
+      console.log('US David voice:', usDavid); // Debug log
+      
+      // Add UK Male voice first (as default)
+      if (ukMale) {
+        const option = document.createElement('option');
+        option.textContent = `${ukMale.name} (${ukMale.lang})`;
+        option.value = ukMale.name;
+        voiceSelect.appendChild(option);
+        // Set as default voice
+        speechState.selectedVoice = ukMale;
+        voiceSelect.value = ukMale.name;
+      }
+      
+      // Add US David voice
+      if (usDavid) {
+        const option = document.createElement('option');
+        option.textContent = `${usDavid.name} (${usDavid.lang})`;
+        option.value = usDavid.name;
+        voiceSelect.appendChild(option);
+      }
+      
+      // If no specific voices found, add all available English voices
+      if (!ukMale && !usDavid) {
+        const englishVoices = voices.filter(voice => voice.lang.includes('en-'));
+        englishVoices.forEach(voice => {
+          const option = document.createElement('option');
+          option.textContent = `${voice.name} (${voice.lang})`;
+          option.value = voice.name;
+          voiceSelect.appendChild(option);
+          
+          // Set first English voice as default if none selected
+          if (!speechState.selectedVoice) {
+            speechState.selectedVoice = voice;
+            voiceSelect.value = voice.name;
+          }
+        });
+      }
+    }
+
+    // Handle voice changes
+    if (speechSynthesis.onvoiceschanged !== undefined) {
+      speechSynthesis.onvoiceschanged = () => {
+        populateVoiceList().then(() => {
+          console.log('Voices initialized with selected voice:', speechState.selectedVoice);
+        });
+      };
+    }
+    // Initial population attempt
+    populateVoiceList();
+
+    // Handle voice selection
+    document.getElementById('voiceSelect').addEventListener('change', (e) => {
+      const voices = speechSynthesis.getVoices();
+      const newVoice = voices.find(voice => voice.name === e.target.value) || null;
+      speechState.selectedVoice = newVoice;
+      
+      // If currently speaking, update the voice immediately
+      if (isReading && currentUtterance) {
+        // Save current position
+        const currentPosition = lastWordBoundary;
+        const currentText = speechState.text;
+        const currentNode = speechState.node;
+        
+        // Cancel current speech
+        speechSynthesis.cancel();
+        
+        // Resume with new voice
+        startSpeaking(currentText, currentPosition, currentNode);
+      }
+    });
+
+    // Handle speed control
+    document.getElementById('speedRange').addEventListener('input', (e) => {
+      const newRate = parseFloat(e.target.value);
+      // Ensure rate is a valid finite number between 0.5 and 2
+      speechState.rate = isFinite(newRate) ? Math.min(Math.max(newRate, 0.5), 2.0) : 1.0;
+      document.getElementById('speedValue').textContent = speechState.rate.toFixed(1) + 'x';
+      
+      // If currently speaking, apply the new rate immediately
+      if (isReading && currentUtterance) {
+        // Save current state
+        const currentPosition = lastWordBoundary;
+        const currentText = speechState.text;
+        const currentNode = speechState.node;
+        
+        // Cancel current speech
+        speechSynthesis.cancel();
+        
+        // Resume with new rate
+        startSpeaking(currentText, currentPosition, currentNode);
+      }
+    });
+
+    const pdfjsLib = window['pdfjs-dist/build/pdf'];
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
+
+    function updatePageInfo(currentPage) {
+      document.getElementById('page-input').value = currentPage;
+      document.getElementById('total-pages').textContent = totalPages;
+      document.getElementById('page-input').max = totalPages;
+    }
+
+    async function goToPage(pageNum) {
+      if (pageNum < 1 || pageNum > totalPages) {
+        // Reset to current page if invalid
+        updatePageInfo(currentPageNum);
+        return;
+      }
+      
+      try {
+        const container = document.getElementById("pdf-container");
+        
+        // Show loading indicator
+        const loadingDiv = document.createElement('div');
+        loadingDiv.className = 'loading';
+        loadingDiv.textContent = `Loading page ${pageNum}...`;
+        document.body.appendChild(loadingDiv);
+        
+        // Clear existing content and reset loaded pages
+        container.innerHTML = '';
+        loadedPages.clear();
+        
+        // Calculate pages to load (2 before and 2 after the target page)
+        const startPage = Math.max(1, pageNum - 2);
+        const endPage = Math.min(totalPages, pageNum + 2);
+        
+        // Load the pages
+        for (let i = startPage; i <= endPage; i++) {
+          await renderPage(i, container);
+          loadedPages.add(i);
+        }
+        
+        // Update current page number
+        currentPageNum = pageNum;
+        updatePageInfo(pageNum);
+        
+        // Remove loading indicator
+        document.body.removeChild(loadingDiv);
+        
+        // Scroll to the requested page
+        const targetPage = container.querySelector(`[data-page-number="${pageNum}"]`);
+        if (targetPage) {
+          // Use requestAnimationFrame to ensure the scroll happens after rendering
+          requestAnimationFrame(() => {
+            targetPage.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          });
+        }
+      } catch (error) {
+        console.error('Error navigating to page:', error);
+        const loadingDiv = document.querySelector('.loading');
+        if (loadingDiv) {
+          document.body.removeChild(loadingDiv);
+        }
+      }
+    }
+
+    function updateLoadingBar(progress) {
+      let loadingBar = document.querySelector('.loading-bar');
+      if (!loadingBar) {
+        loadingBar = document.createElement('div');
+        loadingBar.className = 'loading-bar';
+        document.body.appendChild(loadingBar);
+      }
+      loadingBar.style.width = `${progress}%`;
+      if (progress === 100) {
+        setTimeout(() => {
+          loadingBar.style.width = '0%';
+        }, 500);
+      }
+    }
+
+    async function renderPage(pageNum, container) {
+      if (loadedPages.has(pageNum)) return;
+      
+      // Get the page
+      const page = await pdfDoc.getPage(pageNum);
+      const viewport = page.getViewport({ scale: currentScale });
+
+      // Create page container for centering
+      const pageContainer = document.createElement("div");
+      pageContainer.className = "pdf-page-container";
+
+      // Create content wrapper for padding and centering
+      const contentWrapper = document.createElement("div");
+      contentWrapper.className = "page-content-wrapper";
+
+      // Create wrapper div for the page
+      const pageDiv = document.createElement("div");
+      pageDiv.className = "pdf-page";
+      pageDiv.setAttribute('data-page-number', pageNum);
+      pageDiv.style.width = viewport.width + "px";
+      pageDiv.style.height = viewport.height + "px";
+
+      // Prepare canvas
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
+      canvas.height = viewport.height;
+      canvas.width = viewport.width;
+
+      // Prepare text layer div
+      const textLayerDiv = document.createElement("div");
+      textLayerDiv.className = "textLayer";
+      textLayerDiv.style.width = viewport.width + "px";
+      textLayerDiv.style.height = viewport.height + "px";
+      
+      // Set the scale factor CSS variable
+      textLayerDiv.style.setProperty('--scale-factor', viewport.scale);
+
+      // Add elements to page hierarchy
+      pageDiv.appendChild(canvas);
+      pageDiv.appendChild(textLayerDiv);
+      contentWrapper.appendChild(pageDiv);
+      pageContainer.appendChild(contentWrapper);
+      
+      // Insert the page container in the correct position
+      const existingPages = container.querySelectorAll('.pdf-page-container');
+      let inserted = false;
+      
+      for (const existingPage of existingPages) {
+        const existingPageDiv = existingPage.querySelector('.pdf-page');
+        const existingNum = parseInt(existingPageDiv.getAttribute('data-page-number'));
+        if (existingNum > pageNum) {
+          container.insertBefore(pageContainer, existingPage);
+          inserted = true;
+          break;
+        }
+      }
+      
+      if (!inserted) {
+        container.appendChild(pageContainer);
+      }
+
+      // Render PDF page
+      await page.render({ canvasContext: context, viewport }).promise;
+
+      // Get text content and render text layer
+      const textContent = await page.getTextContent();
+      const textContentSource = pdfjsLib.renderTextLayer({
+        textContentSource: textContent,
+        container: textLayerDiv,
+        viewport: viewport,
+      });
+      await textContentSource.promise;
+    }
+
+    async function loadMorePages(startFromPage = null) {
+      if (isLoadingPages) return;
+      if (startFromPage === null && currentPageNum >= totalPages) return;
+      
+      isLoadingPages = true;
+      const container = document.getElementById("pdf-container");
+      const startPage = startFromPage !== null ? startFromPage : currentPageNum + 1;
+      const endPage = Math.min(startPage + PAGES_PER_LOAD - 1, totalPages);
+      
+      // Show loading indicator
+      updateLoadingBar(0);
+      
+      try {
+        for (let i = startPage; i <= endPage; i++) {
+          await renderPage(i, container);
+          loadedPages.add(i);
+          currentPageNum = i;
+          updatePageInfo(i);
+          updateLoadingBar((i - startPage + 1) / (endPage - startPage + 1) * 100);
+        }
+      } finally {
+        isLoadingPages = false;
+        // Add scroll event listener after initial load
+        setupScrollHandler();
+      }
+    }
+
+    // Function to handle scroll events
+    function setupScrollHandler() {
+      const container = document.getElementById("pdf-container");
+      if (!container.hasScrollListener) {
+        container.hasScrollListener = true;
+        container.addEventListener('scroll', handleScroll);
+      }
+    }
+
+    // Debounce function to limit scroll event handling
+    function debounce(func, wait) {
+      let timeout;
+      return function executedFunction(...args) {
+        const later = () => {
+          clearTimeout(timeout);
+          func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+      };
+    }
+
+    // Handle scroll events
+    const handleScroll = debounce(() => {
+      const container = document.getElementById("pdf-container");
+      const scrollPosition = container.scrollTop + container.clientHeight;
+      const scrollHeight = container.scrollHeight;
+      const threshold = 100; // pixels from bottom
+
+      if (scrollHeight - scrollPosition < threshold) {
+        loadMorePages();
+      }
+    }, 100);
+
+    async function renderPDF() {
+      try {
+        if (!pdfDoc) {
+          pdfDoc = await pdfjsLib.getDocument(url).promise;
+        }
+        
+        const container = document.getElementById("pdf-container");
+        container.innerHTML = ''; // Clear existing content
+        container.hasScrollListener = false; // Reset scroll listener flag
+        loadedPages.clear();
+        currentPageNum = 0;
+        totalPages = pdfDoc.numPages;
+        
+        // Show initial loading state
+        const loadingDiv = document.createElement('div');
+        loadingDiv.className = 'loading';
+        loadingDiv.textContent = 'Loading PDF...';
+        container.appendChild(loadingDiv);
+        
+        try {
+          updatePageInfo(currentPageNum);
+          await loadMorePages();
+        } finally {
+          // Remove loading indicator
+          if (container.contains(loadingDiv)) {
+            container.removeChild(loadingDiv);
+          }
+        }
+      } catch (error) {
+        console.error('Error loading PDF:', error);
+        const container = document.getElementById("pdf-container");
+        container.innerHTML = `
+          <div class="loading">
+            <p>Please select a PDF file:</p>
+            <input type="file" id="file-input" accept="application/pdf" style="margin-top: 10px;">
+          </div>`;
+        
+        // Add file input handler
+        document.getElementById('file-input').addEventListener('change', async (e) => {
+          const file = e.target.files[0];
+          if (file && file.type === 'application/pdf') {
+            try {
+              // Create a URL for the selected file
+              const fileUrl = URL.createObjectURL(file);
+              
+              // Load the new PDF
+              pdfDoc = await pdfjsLib.getDocument(fileUrl).promise;
+              
+              // Reset the container
+              container.innerHTML = '';
+              container.hasScrollListener = false;
+              loadedPages.clear();
+              currentPageNum = 0;
+              totalPages = pdfDoc.numPages;
+              
+              // Show loading state
+              const loadingDiv = document.createElement('div');
+              loadingDiv.className = 'loading';
+              loadingDiv.textContent = 'Loading PDF...';
+              container.appendChild(loadingDiv);
+              
+              try {
+                updatePageInfo(currentPageNum);
+                await loadMorePages();
+              } finally {
+                if (container.contains(loadingDiv)) {
+                  container.removeChild(loadingDiv);
+                }
+              }
+              
+              // Clean up the URL after loading
+              URL.revokeObjectURL(fileUrl);
+            } catch (error) {
+              console.error('Error loading selected PDF:', error);
+              container.innerHTML = '<div class="loading">Error loading the selected PDF. Please try another file.</div>';
+            }
+          }
+        });
+      }
+    }
+
+    async function calculateFitToPageScale() {
+      const page = await pdfDoc.getPage(currentPageNum || 1);
+      const viewport = page.getViewport({ scale: 1 });
+      const container = document.getElementById("pdf-container");
+      const containerWidth = container.clientWidth;
+      
+      // Calculate scale to fit width (minus a small margin)
+      const scaleToFitWidth = (containerWidth - 40) / viewport.width;
+      
+      // Return the calculated scale, with a minimum to prevent too small rendering
+      return Math.max(scaleToFitWidth, 0.8);
+    }
+
+    async function fitToPage() {
+      const container = document.getElementById("pdf-container");
+      const newScale = await calculateFitToPageScale();
+      currentScale = newScale;
+      defaultScale = newScale; // Save as default for future use
+      
+      container.innerHTML = ""; // Clear existing content
+      loadedPages.clear();
+      await renderPDF();
+    }
+
+    async function changeScale(delta) {
+      currentScale += delta;
+      currentScale = Math.max(0.5, Math.min(3, currentScale)); // Limit scale between 0.5 and 3
+      const container = document.getElementById("pdf-container");
+      container.innerHTML = ""; // Clear existing content
+      loadedPages.clear();
+      await renderPDF();
+    }
+
+    // Handle page navigation via Enter key
+    document.getElementById('page-input').addEventListener('keypress', async (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const pageNum = parseInt(e.target.value);
+        if (pageNum && pageNum >= 1 && pageNum <= totalPages) {
+          await goToPage(pageNum);
+          e.target.blur(); // Remove focus from input
+        } else {
+          // Reset to current page if invalid
+          updatePageInfo(currentPageNum);
+        }
+      }
+    });
+
+    // Initialize PDF
+    renderPDF().then(() => {
+      // Set initial zoom level display
+      document.querySelectorAll('.zoom-level').forEach(el => {
+        el.textContent = `${Math.round(currentScale * 100)}%`;
+      });
+
+      // Add scroll tracking to update page number
+      const container = document.getElementById('pdf-container');
+      container.addEventListener('scroll', debounce(() => {
+        const pages = document.querySelectorAll('.pdf-page');
+        const containerRect = container.getBoundingClientRect();
+        
+        for (const page of pages) {
+          const rect = page.getBoundingClientRect();
+          // Check if this page is in the viewport
+          if (rect.top >= containerRect.top && 
+              rect.top <= (containerRect.top + containerRect.height * 0.5)) {
+            const pageNum = parseInt(page.getAttribute('data-page-number'));
+            if (pageNum && pageNum !== currentPageNum) {
+              currentPageNum = pageNum;
+              updatePageInfo(pageNum);
+            }
+            break;
+          }
+        }
+      }, 100));
+    });
+
+    function startSpeaking(text, startPosition = 0, node = null) {
+      isReading = true;
+      playPauseBtn.innerHTML = '<i class="fas fa-pause"></i><span>Pause</span>';
+      statusDiv.style.display = 'inline-block';
+
+      if (node) {
+        node.classList.add('reading');
+      }
+
+      const remainingText = text.slice(startPosition);
+      currentUtterance = new SpeechSynthesisUtterance(remainingText);
+
+      // Apply voice and rate settings
+      if (speechState.selectedVoice) {
+        console.log('Applying voice:', speechState.selectedVoice.name); // Debug log
+        currentUtterance.voice = speechState.selectedVoice;
+      } else {
+        // If no voice is selected, try to get the default UK Male voice
+        const voices = speechSynthesis.getVoices();
+        const ukMale = voices.find(voice => voice.name === 'Google UK English Male');
+        if (ukMale) {
+          console.log('Applying default UK Male voice'); // Debug log
+          currentUtterance.voice = ukMale;
+          speechState.selectedVoice = ukMale;
+        }
+      }
+      
+      // Ensure we have a valid rate value
+      const rate = isFinite(speechState.rate) ? speechState.rate : 1.0;
+      currentUtterance.rate = Math.min(Math.max(rate, 0.5), 2.0);
+
+      currentUtterance.onboundary = (event) => {
+        if (event.name === 'word') {
+          lastWordBoundary = startPosition + event.charIndex;
+          speechState.position = lastWordBoundary;
+        }
+      };
+
+      currentUtterance.onend = () => {
+        if (!speechState.isPaused) {
+          // Only reset if we're not paused (natural end of speech)
+          isReading = false;
+          playPauseBtn.innerHTML = '<i class="fas fa-play"></i><span>Play</span>';
+          statusDiv.style.display = 'none';
+          if (speechState.node) {
+            speechState.node.classList.remove('reading');
+          }
+          // Reset state when finished naturally, but preserve voice settings
+          speechState = { 
+            text: '', 
+            position: 0, 
+            node: null, 
+            isPaused: false,
+            selectedVoice: speechState.selectedVoice, // Preserve the selected voice
+            rate: speechState.rate // Preserve the speech rate
+          };
+          lastWordBoundary = 0;
+        }
+      };
+
+      speechSynthesis.speak(currentUtterance);
+    }
+
+    playPauseBtn.addEventListener('click', () => {
+      if (isReading) {
+        // Pause
+        if (currentUtterance) {
+          speechState.isPaused = true;
+          speechState.position = lastWordBoundary; // Save the last known position
+          speechSynthesis.cancel();
+          
+          // Clear any pending auto-play timeout
+          if (autoPlayTimeout) {
+            clearTimeout(autoPlayTimeout);
+          }
+        }
+        isReading = false;
+        playPauseBtn.innerHTML = '<i class="fas fa-play"></i><span>Play</span>';
+        statusDiv.style.display = 'none';
+      } else {
+        // Play
+        let text = window.getSelection().toString().trim();
+        
+        if (speechState.isPaused) {
+          if (text && text === speechState.text) {
+            // Same text is still selected, resume from paused position
+            startSpeaking(speechState.text, speechState.position, speechState.node);
+            speechState.isPaused = false;
+          } else if (!text && speechState.text) {
+            // No selection but have saved text, resume from paused position
+            startSpeaking(speechState.text, speechState.position, speechState.node);
+            speechState.isPaused = false;
+          } else if (text) {
+            // New text selected while paused, start fresh
+            speechState.isPaused = false;
+            const selection = window.getSelection();
+            const range = selection.getRangeAt(0);
+            const node = range.commonAncestorContainer.parentElement;
+            
+            // Save new state for the new selection while preserving voice settings
+            speechState = {
+              text: text,
+              position: 0,
+              node: node,
+              isPaused: false,
+              selectedVoice: speechState.selectedVoice, // Preserve the selected voice
+              rate: speechState.rate // Preserve the speech rate
+            };
+            startSpeaking(text, 0, node);
+          }
+        } else if (text) {
+          // Fresh start with new text
+          const selection = window.getSelection();
+          const range = selection.getRangeAt(0);
+          const node = range.commonAncestorContainer.parentElement;
+          
+          // Save new state while preserving voice settings
+          speechState = {
+            text: text,
+            position: 0,
+            node: node,
+            isPaused: false,
+            selectedVoice: speechState.selectedVoice, // Preserve the selected voice
+            rate: speechState.rate // Preserve the speech rate
+          };
+          startSpeaking(text, 0, node);
+        }
+      }
+    });
+
+    // Auto-play functionality
+    autoPlayBtn.addEventListener('click', () => {
+      isAutoPlayEnabled = !isAutoPlayEnabled;
+      autoPlayBtn.classList.toggle('active');
+      if (isAutoPlayEnabled) {
+        autoPlayBtn.style.background = 'rgba(0, 0, 0, 0.1)';
+        autoPlayBtn.title = 'Auto-play Enabled';
+      } else {
+        autoPlayBtn.style.background = 'transparent';
+        autoPlayBtn.title = 'Auto-play Disabled';
+      }
+    });
+
+    // Handle text selection
+    document.addEventListener("mouseup", () => {
+      const text = window.getSelection().toString().trim();
+      if (playPauseBtn) {
+        playPauseBtn.style.display = text ? 'flex' : 'none';
+      }
+      
+      // Clear any existing timeout
+      if (typeof autoPlayTimeout !== 'undefined' && autoPlayTimeout) {
+        clearTimeout(autoPlayTimeout);
+      }
+
+      // If auto-play is enabled, not manually paused, and there's selected text, start reading after 1 second
+      if (typeof isAutoPlayEnabled !== 'undefined' && isAutoPlayEnabled && text && !speechState.isPaused) {
+        autoPlayTimeout = setTimeout(() => {
+          const currentText = window.getSelection().toString().trim();
+          if (!isReading && !speechState.isPaused && text === currentText) {
+            const selection = window.getSelection();
+            const range = selection.getRangeAt(0);
+            const node = range.commonAncestorContainer.parentElement;
+            
+            if (speechState.text === text && speechState.position > 0) {
+              // Resume from last position if it's the same text
+              startSpeaking(text, speechState.position, node);
+            } else {
+              // Start fresh with new text
+              speechState = {
+                text: text,
+                position: 0,
+                node: node,
+                isPaused: false
+              };
+              startSpeaking(text, 0, node);
+            }
+          }
+        }, 1000);
+      }
+    });
+
+    // Clean up on page unload
+    window.addEventListener('beforeunload', () => {
+      if (speechSynthesis) {
+        speechSynthesis.cancel();
+      }
+    });
+
+    // Fullscreen functionality
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(err => {
+          console.log(`Error attempting to enable fullscreen: ${err.message}`);
+        });
+      } else {
+        if (document.exitFullscreen) {
+          document.exitFullscreen();
+        }
+      }
+    }
+
+    // Update fullscreen button icon based on fullscreen state
+    document.addEventListener('fullscreenchange', () => {
+      const fullscreenBtn = document.getElementById('fullscreenBtn');
+      if (document.fullscreenElement) {
+        fullscreenBtn.innerHTML = '<i class="fas fa-compress-arrows-alt"></i>';
+        fullscreenBtn.title = "Exit Fullscreen";
+      } else {
+        fullscreenBtn.innerHTML = '<i class="fas fa-expand-arrows-alt"></i>';
+        fullscreenBtn.title = "Enter Fullscreen";
+      }
+    });
+
+  </script>
+</body>
+</html>
