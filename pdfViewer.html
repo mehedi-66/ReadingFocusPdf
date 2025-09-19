@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Reading Focus</title>
   <script src="pdf.min.js"></script>
+  <link rel="icon" type="image/x-icon" href="logo.png">
   <link href="all.min.css" rel="stylesheet">
   <link href="style.css" rel="stylesheet">
 </head>
@@ -14,7 +15,9 @@
       <div class="header">
         <div class="header-left">
           <div class="page-info">
-            <input type="number" id="page-input" min="1" value="1" placeholder="Enter page" /> / <span id="total-pages">0</span>
+            <img src="logo.png" style="width: 30px" alt="" srcset="">
+            <input type="number" id="page-input" min="1" value="1" placeholder="Enter page" /> / <span id="total-pages" style="margin-right:50px">0</span> 
+             <span id="total-pages">CRP</span> <input type="number" id="ReadingLast_input" min="1" value="0" placeholder="Enter page" />
           </div>
         </div>
         <div class="controls">
@@ -42,7 +45,6 @@
               <span id="speedValue">1x</span>
             </div>
           </div>
-          <div id="status">Reading...</div>
         </div>
       </div>
     </div>
@@ -61,6 +63,7 @@
     let isLoadingPages = false;
     let defaultScale = 1.2;
     const PAGES_PER_LOAD = 5;
+    let pdfName ="";
 
 
     function getCurrentPdfName() {
@@ -69,7 +72,6 @@
 
     // Speech-related variables initialization
     const playPauseBtn = document.getElementById('playPauseBtn');
-    const statusDiv = document.getElementById('status');
     const autoPlayBtn = document.getElementById('autoPlayBtn');
     let currentUtterance = null;
     let lastWordBoundary = 0;
@@ -418,6 +420,7 @@
       try {
         if (!pdfDoc) {
           pdfDoc = await pdfjsLib.getDocument(url).promise;
+          pdfName = url;
         }
         
         const container = document.getElementById("pdf-container");
@@ -436,6 +439,7 @@
         try {
           updatePageInfo(currentPageNum);
           await loadMorePages();
+           getReadyDcoument();
         } finally {
           // Remove loading indicator
           if (container.contains(loadingDiv)) {
@@ -454,14 +458,17 @@
         // Add file input handler
         document.getElementById('file-input').addEventListener('change', async (e) => {
           const file = e.target.files[0];
+          
           if (file && file.type === 'application/pdf') {
             try {
               // Create a URL for the selected file
+             pdfName =  file.name = file.name;
+             
               const fileUrl = URL.createObjectURL(file);
               
               // Load the new PDF
               pdfDoc = await pdfjsLib.getDocument(fileUrl).promise;
-              
+               getReadyDcoument();
               // Reset the container
               container.innerHTML = '';
               container.hasScrollListener = false;
@@ -542,6 +549,27 @@
         }
       }
     });
+    document.getElementById('ReadingLast_input').addEventListener('keypress', async (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const pageNum = parseInt(e.target.value);
+        console.log('Saving page number:', pageNum, totalPages); // Debug log
+        if (pageNum && pageNum >= 1 && pageNum <= totalPages) {
+          // save to localStorage
+          localStorage.setItem(`ReadingLast_${pdfName}`, pageNum);
+          console.log('DB Saved page number:', pageNum); // Debug log
+          e.target.blur(); 
+        }
+      }
+    });
+    
+    function getReadyDcoument(){
+      const pageNumber = localStorage.getItem(`ReadingLast_${pdfName}`);
+
+      if (pageNumber) {
+        document.getElementById("ReadingLast_input").value  = pageNumber
+      }
+    }
 
     // Initialize PDF
     renderPDF().then(() => {
@@ -575,7 +603,6 @@
     function startSpeaking(text, startPosition = 0, node = null) {
       isReading = true;
       playPauseBtn.innerHTML = '<i class="fas fa-pause"></i><span>Pause</span>';
-      statusDiv.style.display = 'inline-block';
 
       if (node) {
         node.classList.add('reading');
@@ -615,7 +642,6 @@
           // Only reset if we're not paused (natural end of speech)
           isReading = false;
           playPauseBtn.innerHTML = '<i class="fas fa-play"></i><span>Play</span>';
-          statusDiv.style.display = 'none';
           if (speechState.node) {
             speechState.node.classList.remove('reading');
           }
@@ -650,7 +676,6 @@
         }
         isReading = false;
         playPauseBtn.innerHTML = '<i class="fas fa-play"></i><span>Play</span>';
-        statusDiv.style.display = 'none';
       } else {
         // Play
         let text = window.getSelection().toString().trim();
